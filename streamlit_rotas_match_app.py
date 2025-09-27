@@ -2,18 +2,41 @@ import json
 import os
 from typing import Dict, Any, List, Tuple
 
-import numpy as np
-import pandas as pd
 import streamlit as st
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-from unidecode import unidecode
+
+# --- defensive import to aid debugging on Streamlit Cloud ---
+try:
+    import numpy as np
+    import pandas as pd
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+    from unidecode import unidecode
+except ModuleNotFoundError as e:
+    st.error(
+        "Dependências ausentes. Verifique se o requirements.txt está na RAIZ do repo e contém:
+"
+        "streamlit, scikit-learn, pandas, numpy, unidecode. Depois limpe o cache no Manage app.
+
+"
+        f"Módulo não encontrado: {e}"
+    )
+    st.stop()
 
 # =============================
 # Helpers
 # =============================
 
-PT_STOP_LANG = 'portuguese'
+# Lista simples de stopwords PT (scikit-learn só tem 'english' built-in)
+PT_STOP_WORDS = [
+    'a','à','às','ao','aos','as','o','os','um','uma','umas','uns',
+    'de','do','da','dos','das','d','em','no','na','nos','nas','num','numa',
+    'por','para','pra','pras','pro','pros','com','sem','sob','sobre','entre',
+    'e','ou','mas','tambem','também','como','se','que','quem','quando','onde',
+    'porque','porquê','por que','pois','ja','já','mais','menos','muito','muita','muitos','muitas',
+    'ser','estar','ter','haver','ir','vai','vai','foi','era','sao','são','serao','serão','seria','seriam',
+    'eu','tu','ele','ela','nos','nós','vos','vós','eles','elas','me','te','se','lhe','lhes','nosso','nossa','nossos','nossas',
+    'isso','isto','aquilo','este','esta','esse','essa','aquele','aquela','estes','estas','esses','essas','aqueles','aquelas'
+]
 
 SENIORITY_ORDER = {
     'estagio': 0,
@@ -130,7 +153,7 @@ def load_jobs(json_file: str) -> pd.DataFrame:
 
 @st.cache_resource(show_spinner=False)
 def build_vectorizer(corpus: List[str]) -> Tuple[TfidfVectorizer, np.ndarray]:
-    vect = TfidfVectorizer(stop_words=PT_STOP_LANG, min_df=1, max_df=0.9, ngram_range=(1, 2))
+    vect = TfidfVectorizer(stop_words=PT_STOP_WORDS, min_df=1, max_df=0.9, ngram_range=(1, 2))
     X = vect.fit_transform([norm_text(c) for c in corpus])
     return vect, X
 
@@ -339,3 +362,4 @@ if submitted:
     st.caption('Obs.: Este é um MVP. Ajuste os pesos e os campos do formulário conforme a realidade do seu processo.')
 else:
     st.info('Preencha o formulário e clique em **Buscar matches**. No menu lateral você pode ajustar os pesos e enviar o JSON de vagas.')
+
