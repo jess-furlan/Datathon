@@ -1,25 +1,22 @@
 import json
 import os
 from typing import Dict, Any, List, Tuple
-
-
 import streamlit as st
-
-
 # --- defensive import to aid debugging on Streamlit Cloud ---
+
 try:
-import numpy as np
-import pandas as pd
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-from unidecode import unidecode
+    import numpy as np
+    import pandas as pd
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+    from unidecode import unidecode
 except ModuleNotFoundError as e:
-st.error(
-"Dependências ausentes. Verifique se o requirements.txt está na RAIZ do repo e contém: "
-"streamlit, scikit-learn, pandas, numpy, unidecode. Depois limpe o cache no Manage app. "
-f"Módulo não encontrado: {e}"
-)
-st.stop()
+    st.error(
+        "Dependências ausentes. Verifique se o requirements.txt está na RAIZ do repo e contém: "
+        "streamlit, scikit-learn, pandas, numpy, unidecode. Depois limpe o cache no Manage app. "
+        f"Módulo não encontrado: {e}"
+    )
+    st.stop()
 
 # =============================
 # Helpers
