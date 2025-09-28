@@ -333,8 +333,7 @@ if trigger:
         # Build corpus & vectorizer
         vect, X_jobs = build_vectorizer(df_jobs['bag_text'].fillna('').tolist())
 
-        cand_text = ' 
- '.join([
+        cand_text = ' '.join([
             cand_senior,
             f"Inglês: {cand_ingles}", f"Espanhol: {cand_espanhol}",
             cand_skills, cand_obj
