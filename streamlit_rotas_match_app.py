@@ -3,9 +3,38 @@ import os
 import re
 from typing import Dict, Any, List, Tuple, Set
 
-import streamlit as st
+# =========================================
+# Streamlit shim (so code runs without it)
+# =========================================
+STREAMLIT_AVAILABLE = True
+try:
+    import streamlit as st  # UI runtime
+except ModuleNotFoundError:
+    STREAMLIT_AVAILABLE = False
 
-# --- defensive import to aid debugging on Streamlit Cloud ---
+    class _StShim:
+        """Minimal shim to allow importing/running this file without Streamlit.
+        Provides no-op methods and decorator fallbacks used in tests/CLI.
+        """
+        def __getattr__(self, name):  # st.header, st.write, st.stop, etc.
+            def _noop(*args, **kwargs):
+                return None
+            return _noop
+
+    st = _StShim()
+
+    # cache decorators become identity decorators
+    def _identity_decorator(*dargs, **dkwargs):
+        def _wrap(fn):
+            return fn
+        return _wrap
+
+    st.cache_data = _identity_decorator
+    st.cache_resource = _identity_decorator
+
+# =========================================
+# Core deps (numpy/pandas/sklearn/unidecode)
+# =========================================
 try:
     import numpy as np
     import pandas as pd
@@ -13,12 +42,11 @@ try:
     from sklearn.metrics.pairwise import cosine_similarity
     from unidecode import unidecode
 except ModuleNotFoundError as e:
-    st.error(
-        "Dependências ausentes. Verifique se o requirements.txt está na RAIZ do repo e contém: "
-        "streamlit, scikit-learn, pandas, numpy, unidecode. Depois limpe o cache no Manage app. "
+    # In CLI/tests we fail fast with a helpful message
+    raise SystemExit(
+        "Dependências ausentes. Instale: numpy, pandas, scikit-learn, unidecode.\n"
         f"Módulo não encontrado: {e}"
     )
-    st.stop()
 
 # =============================
 # Helpers • Linguagem
@@ -55,7 +83,7 @@ LANG_LEVEL_ORDER = {
 
 CONTRACT_TYPES = ['CLT', 'CLT Full', 'PJ', 'Estágio', 'Temporário', 'Tempo Parcial', 'Freelancer', 'Cooperado']
 
-# Léxico simples (pode expandir conforme contexto)
+# Léxico simples (expanda conforme necessidade do domínio)
 SKILL_SYNONYMS: Dict[str, Set[str]] = {
     'aws': {'amazon web services', 'ec2', 's3', 'rds', 'lambda', 'cloudwatch'},
     'sap basis': {'sap', 'basis'},
@@ -313,185 +341,295 @@ def compute_scores(df: pd.DataFrame, vect: TfidfVectorizer, X_jobs, *,
     return out.sort_values('score_final', ascending=False)
 
 # =============================
-# UI
+# Streamlit UI (executado apenas se houver streamlit)
 # =============================
 
-st.set_page_config(page_title='Roteirizador de Entrevistas • Match de Vagas (v2)', layout='wide')
-st.title('🎯 Roteirizador de Entrevistas — Match de Vagas (v2)')
+def main_streamlit() -> None:
+    st.set_page_config(page_title='Roteirizador de Entrevistas • Match de Vagas (v2)', layout='wide')
+    st.title('🎯 Roteirizador de Entrevistas — Match de Vagas (v2)')
 
-with st.sidebar:
-    st.header('⚙️ Dados de Vagas')
-    st.caption('O arquivo **deve se chamar exatamente** `vagas.json`.')
-    upload = st.file_uploader('Envie o arquivo vagas.json (JSON)', type=['json'])
-    default_path = 'vagas.json'
-    df_jobs = None
-    if upload is not None:
-        if upload.name != 'vagas.json':
-            st.error('O arquivo enviado deve se chamar **vagas.json**. Renomeie e envie novamente.')
+    with st.sidebar:
+        st.header('⚙️ Dados de Vagas')
+        st.caption('O arquivo **deve se chamar exatamente** `vagas.json`.')
+        upload = st.file_uploader('Envie o arquivo vagas.json (JSON)', type=['json'])
+        default_path = 'vagas.json'
+        df_jobs = None
+        if upload is not None:
+            if upload.name != 'vagas.json':
+                st.error('O arquivo enviado deve se chamar **vagas.json**. Renomeie e envie novamente.')
+                st.stop()
+            jobs = json.load(upload)
+            df_jobs = jobs_json_to_df(jobs)
+        elif os.path.exists(default_path):
+            st.caption('Usando vagas.json encontrado no diretório do app.')
+            df_jobs = load_jobs(default_path)
+        else:
+            st.info('Envie o arquivo **vagas.json** no formato esperado.')
+
+        st.divider()
+        st.subheader('🔧 Pesos do Match')
+        colw1, colw2 = st.columns(2)
+        with colw1:
+            w_text = st.slider('Peso — Texto (TF-IDF + Overlap)', 0.0, 1.0, 0.55, 0.05)
+            w_sen  = st.slider('Peso — Senioridade',               0.0, 1.0, 0.15, 0.05)
+            w_loc  = st.slider('Peso — Localização',               0.0, 1.0, 0.10, 0.05)
+        with colw2:
+            w_en   = st.slider('Peso — Inglês',                    0.0, 1.0, 0.08, 0.02)
+            w_es   = st.slider('Peso — Espanhol',                  0.0, 1.0, 0.05, 0.02)
+            w_ctr  = st.slider('Peso — Tipo de Contrato',          0.0, 1.0, 0.07, 0.02)
+
+        total_w = w_text + w_sen + w_loc + w_en + w_es + w_ctr
+        weights = {
+            'texto':       w_text/total_w,
+            'senioridade': w_sen/total_w,
+            'local':       w_loc/total_w,
+            'ingles':      w_en/total_w,
+            'espanhol':    w_es/total_w,
+            'contrato':    w_ctr/total_w
+        }
+
+        st.subheader('🎚️ Limiar de Match')
+        match_threshold = st.slider('Pontuação mínima', 0.0, 1.0, 0.35, 0.01)
+
+        st.subheader('🧪 Parâmetros textuais')
+        text_boost = st.slider('Peso interno — TF-IDF', 0.0, 1.0, 0.65, 0.05)
+        skill_boost = 1.0 - text_boost
+        st.caption(f"Overlap de habilidades = {skill_boost:.2f}")
+
+        recalc = st.button('🔁 Recalcular matches')
+
+    st.subheader('📝 Formulário do Entrevistador')
+    with st.form('form_candidato'):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            cand_nome = st.text_input('Nome do candidato (opcional)')
+            cand_estado = st.text_input('Estado (UF) do candidato')
+            cand_cidade = st.text_input('Cidade do candidato')
+        with c2:
+            cand_senior = st.selectbox('Senioridade do candidato', ['Júnior','Pleno','Sênior','Especialista / Líder','Gerente','Outro'], index=1)
+            cand_contrato = st.selectbox('Preferência de contrato', CONTRACT_TYPES, index=0)
+            _ = st.text_input('Disponibilidade/Inicio (livre)')
+        with c3:
+            cand_ingles = st.selectbox('Inglês',   ['Nenhum','Básico','Intermediário','Avançado','Fluente','Nativo'], index=2)
+            cand_espanhol = st.selectbox('Espanhol',['Nenhum','Básico','Intermediário','Avançado','Fluente','Nativo'], index=0)
+            top_k = st.slider('Quantos matches retornar?', 3, 30, 10, 1)
+
+        cand_skills = st.text_area('Resumo técnico do candidato (stack, ferramentas, certificações, experiências relevantes)', height=150, placeholder='Ex.: AWS, SAP BASIS, SQL, Oracle, gestão de incidentes, ITIL, liderança de times, negociação...')
+        cand_obj = st.text_area('Objetivo / áreas de interesse (opcional)', height=80)
+
+        submitted = st.form_submit_button('🔎 Buscar matches')
+
+    trigger = submitted or recalc
+    if trigger:
+        if df_jobs is None or df_jobs.empty:
+            st.error('Nenhum arquivo de vagas carregado. Envie o **vagas.json** no menu lateral.')
             st.stop()
-        jobs = json.load(upload)
-        df_jobs = jobs_json_to_df(jobs)
-    elif os.path.exists(default_path):
-        st.caption('Usando vagas.json encontrado no diretório do app.')
-        df_jobs = load_jobs(default_path)
-    else:
-        st.info('Envie o arquivo **vagas.json** no formato esperado.')
 
-    st.divider()
-    st.subheader('🔧 Pesos do Match')
-    colw1, colw2 = st.columns(2)
-    with colw1:
-        w_text = st.slider('Peso — Texto (TF-IDF + Overlap)', 0.0, 1.0, 0.55, 0.05)
-        w_sen  = st.slider('Peso — Senioridade',               0.0, 1.0, 0.15, 0.05)
-        w_loc  = st.slider('Peso — Localização',               0.0, 1.0, 0.10, 0.05)
-    with colw2:
-        w_en   = st.slider('Peso — Inglês',                    0.0, 1.0, 0.08, 0.02)
-        w_es   = st.slider('Peso — Espanhol',                  0.0, 1.0, 0.05, 0.02)
-        w_ctr  = st.slider('Peso — Tipo de Contrato',          0.0, 1.0, 0.07, 0.02)
+        with st.spinner('Calculando matches...'):
+            vect, X_jobs = build_vectorizer(df_jobs['bag_text'].fillna('').tolist())
 
-    total_w = w_text + w_sen + w_loc + w_en + w_es + w_ctr
-    weights = {
-        'texto':       w_text/total_w,
-        'senioridade': w_sen/total_w,
-        'local':       w_loc/total_w,
-        'ingles':      w_en/total_w,
-        'espanhol':    w_es/total_w,
-        'contrato':    w_ctr/total_w
-    }
+            cand_text = " \n ".join([
+                cand_senior,
+                f"Inglês: {cand_ingles}",
+                f"Espanhol: {cand_espanhol}",
+                cand_skills,
+                cand_obj
+            ])
 
-    st.subheader('🎚️ Limiar de Match')
-    match_threshold = st.slider('Pontuação mínima', 0.0, 1.0, 0.35, 0.01)
+            scored = compute_scores(
+                df_jobs, vect, X_jobs,
+                cand_text=cand_text,
+                cand_senior=cand_senior,
+                cand_ingles=cand_ingles,
+                cand_espanhol=cand_espanhol,
+                cand_estado=cand_estado,
+                cand_cidade=cand_cidade,
+                cand_contrato=cand_contrato,
+                weights=weights,
+                text_boost=text_boost,
+                skill_boost=skill_boost,
+            )
 
-    st.subheader('🧪 Parâmetros textuais')
-    text_boost = st.slider('Peso interno — TF-IDF', 0.0, 1.0, 0.65, 0.05)
-    skill_boost = 1.0 - text_boost
-    st.caption(f"Overlap de habilidades = {skill_boost:.2f}")
+            matches = scored[scored['score_final'] >= match_threshold].copy()
 
-    recalc = st.button('🔁 Recalcular matches')
-
-st.subheader('📝 Formulário do Entrevistador')
-with st.form('form_candidato'):
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        cand_nome = st.text_input('Nome do candidato (opcional)')
-        cand_estado = st.text_input('Estado (UF) do candidato')
-        cand_cidade = st.text_input('Cidade do candidato')
-    with c2:
-        cand_senior = st.selectbox('Senioridade do candidato', ['Júnior','Pleno','Sênior','Especialista / Líder','Gerente','Outro'], index=1)
-        cand_contrato = st.selectbox('Preferência de contrato', CONTRACT_TYPES, index=0)
-        _ = st.text_input('Disponibilidade/Inicio (livre)')
-    with c3:
-        cand_ingles = st.selectbox('Inglês',   ['Nenhum','Básico','Intermediário','Avançado','Fluente','Nativo'], index=2)
-        cand_espanhol = st.selectbox('Espanhol',['Nenhum','Básico','Intermediário','Avançado','Fluente','Nativo'], index=0)
-        top_k = st.slider('Quantos matches retornar?', 3, 30, 10, 1)
-
-    cand_skills = st.text_area('Resumo técnico do candidato (stack, ferramentas, certificações, experiências relevantes)', height=150, placeholder='Ex.: AWS, SAP BASIS, SQL, Oracle, gestão de incidentes, ITIL, liderança de times, negociação...')
-    cand_obj = st.text_area('Objetivo / áreas de interesse (opcional)', height=80)
-
-    submitted = st.form_submit_button('🔎 Buscar matches')
-
-trigger = submitted or recalc
-if trigger:
-    if df_jobs is None or df_jobs.empty:
-        st.error('Nenhum arquivo de vagas carregado. Envie o **vagas.json** no menu lateral.')
-        st.stop()
-
-    with st.spinner('Calculando matches...'):
-        vect, X_jobs = build_vectorizer(df_jobs['bag_text'].fillna('').tolist())
-
-        cand_text = " \n ".join([
-            cand_senior,
-            f"Inglês: {cand_ingles}",
-            f"Espanhol: {cand_espanhol}",
-            cand_skills,
-            cand_obj
-        ])
-
-        scored = compute_scores(
-            df_jobs, vect, X_jobs,
-            cand_text=cand_text,
-            cand_senior=cand_senior,
-            cand_ingles=cand_ingles,
-            cand_espanhol=cand_espanhol,
-            cand_estado=cand_estado,
-            cand_cidade=cand_cidade,
-            cand_contrato=cand_contrato,
-            weights=weights,
-            text_boost=text_boost,
-            skill_boost=skill_boost,
+        st.caption(
+            f"Pesos usados → Texto: {weights['texto']:.2f} • Senioridade: {weights['senioridade']:.2f} • "
+            f"Inglês: {weights['ingles']:.2f} • Espanhol: {weights['espanhol']:.2f} • "
+            f"Local: {weights['local']:.2f} • Contrato: {weights['contrato']:.2f} | "
+            f"TF-IDF interno: {text_boost:.2f} • Overlap: {skill_boost:.2f}"
         )
 
-        matches = scored[scored['score_final'] >= match_threshold].copy()
+        if matches.empty:
+            rec = {
+                'timestamp': pd.Timestamp.now().isoformat(),
+                'nome': cand_nome,
+                'estado': cand_estado,
+                'cidade': cand_cidade,
+                'senioridade': cand_senior,
+                'ingles': cand_ingles,
+                'espanhol': cand_espanhol,
+                'contrato': cand_contrato,
+                'skills': cand_skills,
+                'objetivo': cand_obj,
+                'obs': 'Sem vagas compatíveis no momento'
+            }
+            path_saved = save_candidate_record(rec)
+            st.warning('Não há vagas compatíveis com o perfil informado (acima do limiar). Os dados do candidato foram armazenados na **base de candidatos** para futuras oportunidades.')
+            st.caption(f'Base de candidatos: {path_saved}')
+            st.stop()
 
-    st.caption(
-        f"Pesos usados → Texto: {weights['texto']:.2f} • Senioridade: {weights['senioridade']:.2f} • "
-        f"Inglês: {weights['ingles']:.2f} • Espanhol: {weights['espanhol']:.2f} • "
-        f"Local: {weights['local']:.2f} • Contrato: {weights['contrato']:.2f} | "
-        f"TF-IDF interno: {text_boost:.2f} • Overlap: {skill_boost:.2f}"
+        st.success(f"{len(matches)} vagas compatíveis (limiar {match_threshold:.2f}). Exibindo top {top_k}.")
+
+        cols = ['job_id','titulo','area','cidade','estado','nivel_prof','ingles_req','espanhol_req','contrato','score_final']
+        st.dataframe(matches[cols].head(top_k).style.format({'score_final': '{:.3f}'}), use_container_width=True)
+
+        st.divider()
+        st.subheader('🔎 Detalhamento por vaga (top resultados)')
+
+        try:
+            import matplotlib.pyplot as plt
+        except ModuleNotFoundError:
+            plt = None
+
+        for _, row in matches.head(min(5, len(matches))).iterrows():
+            with st.expander(f"{row['job_id']} — {row['titulo']}  •  Score: {row['score_final']:.3f}"):
+                cA, cB = st.columns([2,1])
+                with cA:
+                    st.markdown('**Principais atividades**')
+                    st.write(row.get('atividades', ''))
+                    st.markdown('**Competências**')
+                    st.write(row.get('competencias', ''))
+                with cB:
+                    st.markdown('**Match breakdown**')
+                    st.metric('Texto (comb.)', f"{row['score_texto']:.3f}")
+                    st.metric('• TF-IDF', f"{row['score_texto_tfidf']:.3f}")
+                    st.metric('• Overlap', f"{row['score_texto_overlap']:.3f}")
+                    st.metric('Senioridade', f"{row['score_senioridade']:.3f}")
+                    st.metric('Inglês', f"{row['score_ingles']:.3f}")
+                    st.metric('Espanhol', f"{row['score_espanhol']:.3f}")
+                    st.metric('Localização', f"{row['score_local']:.3f}")
+                    st.metric('Contrato', f"{row['score_contrato']:.3f}")
+
+                if plt is not None:
+                    labels = ['Texto','Senioridade','Inglês','Espanhol','Local','Contrato']
+                    values = [
+                        float(row['score_texto']),
+                        float(row['score_senioridade']),
+                        float(row['score_ingles']),
+                        float(row['score_espanhol']),
+                        float(row['score_local']),
+                        float(row['score_contrato'])
+                    ]
+                    fig, ax = plt.subplots()
+                    ax.bar(labels, values)
+                    ax.set_ylim(0, 1)
+                    ax.set_ylabel('Score (0-1)')
+                    ax.set_title('Decomposição de Score')
+                    st.pyplot(fig)
+
+    else:
+        st.info('Preencha o formulário e clique em **Buscar matches** ou use **Recalcular matches** no menu lateral.')
+
+# =============================
+# CLI self-tests (executados quando streamlit não está disponível)
+# =============================
+
+def _default_weights() -> Dict[str, float]:
+    w = {'texto':0.6,'senioridade':0.12,'ingles':0.06,'espanhol':0.04,'local':0.1,'contrato':0.08}
+    s = sum(w.values())
+    return {k:v/s for k,v in w.items()}
+
+
+def run_tests() -> None:
+    print('[tests] iniciando...')
+
+    # 1) tokenização básica
+    toks = tokenize('AWS, EC2 & Oracle - gestão de incidentes!')
+    assert 'aws' in toks and 'ec2' in toks and 'oracle' in toks, 'tokenize falhou'
+
+    # 2) expansão de sinônimos
+    ex = expand_query_skills(toks)
+    assert 'cloudwatch' in ex or 'amazon web services' in ex, 'expand_query_skills não expandiu AWS'
+
+    # 3) ranking por skills/TF-IDF
+    jobs = {
+        '1': {
+            'informacoes_basicas': {'titulo_vaga': 'Operations Lead'},
+            'perfil_vaga': {
+                'areas_atuacao': 'TI - Sistemas e Ferramentas',
+                'principais_atividades': 'Gestão de incidentes e serviços em AWS, EC2, S3, ITIL',
+                'competencia_tecnicas_e_comportamentais': 'Liderança, comunicação, ITIL',
+                'cidade': 'São Paulo', 'estado': 'São Paulo',
+                'nivel profissional': 'Sênior',
+                'nivel_ingles': 'Avançado', 'nivel_espanhol': 'Intermediário'
+            },
+            'informacoes_basicas_extra': {'tipo_contratacao': 'CLT'}
+        },
+        '2': {
+            'informacoes_basicas': {'titulo_vaga': 'Desenvolvedor SQL'},
+            'perfil_vaga': {
+                'areas_atuacao': 'Dados',
+                'principais_atividades': 'Modelagem de dados, procedures PL/SQL, Oracle',
+                'competencia_tecnicas_e_comportamentais': 'Trabalho em equipe',
+                'cidade': 'São Paulo', 'estado': 'São Paulo',
+                'nivel profissional': 'Pleno',
+                'nivel_ingles': 'Intermediário', 'nivel_espanhol': 'Nenhum'
+            },
+            'informacoes_basicas_extra': {'tipo_contratacao': 'CLT'}
+        }
+    }
+
+    # Harmoniza o campo usado no parser (tipo_contratacao)
+    for j in jobs.values():
+        if 'informacoes_basicas' in j and 'informacoes_basicas_extra' in j:
+            j['informacoes_basicas'].setdefault('tipo_contratacao', j['informacoes_basicas_extra'].get('tipo_contratacao',''))
+
+    df = jobs_json_to_df(jobs)
+    vect, X = build_vectorizer(df['bag_text'].tolist())
+
+    cand_text = 'Pleno\n Inglês: Intermediário\n Espanhol: Nenhum\n AWS, EC2, SQL, ITIL, liderança'
+    scored = compute_scores(
+        df, vect, X,
+        cand_text=cand_text,
+        cand_senior='Pleno',
+        cand_ingles='Intermediário',
+        cand_espanhol='Nenhum',
+        cand_estado='São Paulo',
+        cand_cidade='São Paulo',
+        cand_contrato='CLT',
+        weights=_default_weights(),
+        text_boost=0.6, skill_boost=0.4
     )
 
-    if matches.empty:
-        rec = {
-            'timestamp': pd.Timestamp.now().isoformat(),
-            'nome': cand_nome,
-            'estado': cand_estado,
-            'cidade': cand_cidade,
-            'senioridade': cand_senior,
-            'ingles': cand_ingles,
-            'espanhol': cand_espanhol,
-            'contrato': cand_contrato,
-            'skills': cand_skills,
-            'objetivo': cand_obj,
-            'obs': 'Sem vagas compatíveis no momento'
-        }
-        path_saved = save_candidate_record(rec)
-        st.warning('Não há vagas compatíveis com o perfil informado (acima do limiar). Os dados do candidato foram armazenados na **base de candidatos** para futuras oportunidades.')
-        st.caption(f'Base de candidatos: {path_saved}')
-        st.stop()
+    top_id = str(scored.iloc[0]['job_id'])
+    assert top_id == '1', f"esperado job_id '1' com AWS no topo, obtido {top_id}"
 
-    st.success(f"{len(matches)} vagas compatíveis (limiar {match_threshold:.2f}). Exibindo top {top_k}.")
+    # 4) efeito de sinônimo (mysql ~ sql)
+    cand_text2 = 'Desenvolvedor MySQL e Postgres, modelagem, procedures'
+    scored2 = compute_scores(
+        df, vect, X,
+        cand_text=cand_text2,
+        cand_senior='Pleno',
+        cand_ingles='Intermediário',
+        cand_espanhol='Nenhum',
+        cand_estado='São Paulo',
+        cand_cidade='São Paulo',
+        cand_contrato='CLT',
+        weights=_default_weights(),
+        text_boost=0.6, skill_boost=0.4
+    )
+    top_id2 = str(scored2.iloc[0]['job_id'])
+    assert top_id2 == '2', f"esperado job_id '2' (SQL/Oracle) no topo com MySQL/Postgres, obtido {top_id2}"
 
-    cols = ['job_id','titulo','area','cidade','estado','nivel_prof','ingles_req','espanhol_req','contrato','score_final']
-    st.dataframe(matches[cols].head(top_k).style.format({'score_final': '{:.3f}'}), use_container_width=True)
+    print('[tests] OK — todos os testes passaram')
 
-    st.divider()
-    st.subheader('🔎 Detalhamento por vaga (top resultados)')
 
-    import matplotlib.pyplot as plt
-
-    for _, row in matches.head(min(5, len(matches))).iterrows():
-        with st.expander(f"{row['job_id']} — {row['titulo']}  •  Score: {row['score_final']:.3f}"):
-            cA, cB = st.columns([2,1])
-            with cA:
-                st.markdown('**Principais atividades**')
-                st.write(row.get('atividades', ''))
-                st.markdown('**Competências**')
-                st.write(row.get('competencias', ''))
-            with cB:
-                st.markdown('**Match breakdown**')
-                st.metric('Texto (comb.)', f"{row['score_texto']:.3f}")
-                st.metric('• TF-IDF', f"{row['score_texto_tfidf']:.3f}")
-                st.metric('• Overlap', f"{row['score_texto_overlap']:.3f}")
-                st.metric('Senioridade', f"{row['score_senioridade']:.3f}")
-                st.metric('Inglês', f"{row['score_ingles']:.3f}")
-                st.metric('Espanhol', f"{row['score_espanhol']:.3f}")
-                st.metric('Localização', f"{row['score_local']:.3f}")
-                st.metric('Contrato', f"{row['score_contrato']:.3f}")
-
-            labels = ['Texto','Senioridade','Inglês','Espanhol','Local','Contrato']
-            values = [
-                float(row['score_texto']),
-                float(row['score_senioridade']),
-                float(row['score_ingles']),
-                float(row['score_espanhol']),
-                float(row['score_local']),
-                float(row['score_contrato'])
-            ]
-            fig, ax = plt.subplots()
-            ax.bar(labels, values)
-            ax.set_ylim(0, 1)
-            ax.set_ylabel('Score (0-1)')
-            ax.set_title('Decomposição de Score')
-            st.pyplot(fig)
-else:
-    st.info('Preencha o formulário e clique em **Buscar matches** ou use **Recalcular matches** no menu lateral.')
+if __name__ == '__main__':
+    if STREAMLIT_AVAILABLE:
+        # Executa UI no runtime Streamlit
+        main_streamlit()
+    else:
+        # Sem Streamlit: roda testes/CLI para validar o mecanismo de match
+        print('[info] Streamlit não encontrado — executando self-tests CLI...')
+        run_tests()
+        print('[info] Self-tests finalizados com sucesso.')
