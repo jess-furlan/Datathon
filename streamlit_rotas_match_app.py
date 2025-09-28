@@ -1,9 +1,10 @@
 import json
 import os
 from typing import Dict, Any, List, Tuple
-import streamlit as st
-# --- defensive import to aid debugging on Streamlit Cloud ---
 
+import streamlit as st
+
+# --- defensive import to aid debugging on Streamlit Cloud ---
 try:
     import numpy as np
     import pandas as pd
@@ -146,6 +147,15 @@ def load_jobs(json_file: str) -> pd.DataFrame:
         jobs = json.load(f)
     return jobs_json_to_df(jobs)
 
+# Persistência simples: base de candidatos
+def save_candidate_record(record: Dict[str, Any], path: str = 'data/candidatos.csv') -> str:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    df_row = pd.DataFrame([record])
+    if os.path.exists(path):
+        df_row.to_csv(path, mode='a', header=False, index=False)
+    else:
+        df_row.to_csv(path, index=False)
+    return path
 
 @st.cache_resource(show_spinner=False)
 def build_vectorizer(corpus: List[str]) -> Tuple[TfidfVectorizer, np.ndarray]:
@@ -245,17 +255,21 @@ st.title('🎯 Roteirizador de Entrevistas — Match de Vagas')
 
 with st.sidebar:
     st.header('⚙️ Dados de Vagas')
-    upload = st.file_uploader('Carregue o arquivo jobs/vagas (JSON)', type=['json'])
+    st.caption('O arquivo **deve se chamar exatamente** `vagas.json`.')
+    upload = st.file_uploader('Envie o arquivo vagas.json (JSON)', type=['json'])
     default_path = 'vagas.json'
     df_jobs = None
     if upload is not None:
+        if upload.name != 'vagas.json':
+            st.error('O arquivo enviado deve se chamar **vagas.json**. Renomeie e envie novamente.')
+            st.stop()
         jobs = json.load(upload)
         df_jobs = jobs_json_to_df(jobs)
     elif os.path.exists(default_path):
         st.caption('Usando vagas.json encontrado no diretório do app.')
         df_jobs = load_jobs(default_path)
     else:
-        st.info('Envie um arquivo JSON no formato do Jobs.json.')
+        st.info('Envie o arquivo **vagas.json** no formato esperado.')
 
     st.divider()
     st.subheader('🔧 Pesos do Match')
@@ -278,6 +292,12 @@ with st.sidebar:
         'espanhol': w_es/total_w,
         'contrato': w_ctr/total_w
     }
+
+    st.subheader('🎚️ Limiar de Match')
+    match_threshold = st.slider('Pontuação mínima', 0.0, 1.0, 0.35, 0.01)
+
+    # Botão de recálculo independente do form
+    recalc = st.button('🔁 Recalcular matches')
 
 
 st.subheader('📝 Formulário do Entrevistador')
@@ -303,42 +323,77 @@ with st.form('form_candidato'):
 
     submitted = st.form_submit_button('🔎 Buscar matches')
 
-if submitted:
+trigger = submitted or ('recalc' in locals() and recalc)
+if trigger:
     if df_jobs is None or df_jobs.empty:
-        st.error('Nenhum arquivo de vagas carregado. Envie um JSON no menu lateral.')
+        st.error('Nenhum arquivo de vagas carregado. Envie o **vagas.json** no menu lateral.')
         st.stop()
 
-    # Build corpus & vectorizer
-    vect, X_jobs = build_vectorizer(df_jobs['bag_text'].fillna('').tolist())
+    with st.spinner('Calculando matches...'):
+        # Build corpus & vectorizer
+        vect, X_jobs = build_vectorizer(df_jobs['bag_text'].fillna('').tolist())
 
-    cand_text = ' \n '.join([
-        cand_senior,
-        f"Inglês: {cand_ingles}", f"Espanhol: {cand_espanhol}",
-        cand_skills, cand_obj
-    ])
+        cand_text = ' 
+ '.join([
+            cand_senior,
+            f"Inglês: {cand_ingles}", f"Espanhol: {cand_espanhol}",
+            cand_skills, cand_obj
+        ])
 
-    scored = compute_scores(
-        df_jobs, vect, X_jobs,
-        cand_text=cand_text,
-        cand_senior=cand_senior,
-        cand_ingles=cand_ingles,
-        cand_espanhol=cand_espanhol,
-        cand_estado=cand_estado,
-        cand_cidade=cand_cidade,
-        cand_contrato=cand_contrato,
-        weights=weights
+        scored = compute_scores(
+            df_jobs, vect, X_jobs,
+            cand_text=cand_text,
+            cand_senior=cand_senior,
+            cand_ingles=cand_ingles,
+            cand_espanhol=cand_espanhol,
+            cand_estado=cand_estado,
+            cand_cidade=cand_cidade,
+            cand_contrato=cand_contrato,
+            weights=weights
+        )
+
+        # Filtrar por limiar de match
+        matches = scored[scored['score_final'] >= match_threshold].copy()
+
+    # auditoria dos pesos usados
+    st.caption(
+        f"Pesos usados → Texto: {weights['texto']:.2f} • Senioridade: {weights['senioridade']:.2f} • "
+        f"Inglês: {weights['ingles']:.2f} • Espanhol: {weights['espanhol']:.2f} • "
+        f"Local: {weights['local']:.2f} • Contrato: {weights['contrato']:.2f}"
     )
 
-    st.success(f"Encontradas {len(scored)} vagas. Exibindo top {top_k} por score final.")
+    if matches.empty:
+        # Salva candidato para futuras oportunidades
+        rec = {
+            'timestamp': pd.Timestamp.now().isoformat(),
+            'nome': cand_nome,
+            'estado': cand_estado,
+            'cidade': cand_cidade,
+            'senioridade': cand_senior,
+            'ingles': cand_ingles,
+            'espanhol': cand_espanhol,
+            'contrato': cand_contrato,
+            'skills': cand_skills,
+            'objetivo': cand_obj,
+            'obs': 'Sem vagas compatíveis no momento'
+        }
+        path_saved = save_candidate_record(rec)
+        st.warning('Não há vagas compatíveis com o perfil informado (acima do limiar). Os dados do candidato foram armazenados na **base de candidatos** para futuras oportunidades.')
+        st.caption(f'Base de candidatos: {path_saved}')
+        st.stop()
 
-    # Tabela resumida
+    st.success(f"{len(matches)} vagas compatíveis (limiar {match_threshold:.2f}). Exibindo top {top_k}.")
+
     cols = ['job_id', 'titulo', 'area', 'cidade', 'estado', 'nivel_prof', 'ingles_req', 'espanhol_req', 'contrato', 'score_final']
-    st.dataframe(scored[cols].head(top_k).style.format({'score_final': '{:.3f}'}), use_container_width=True)
+    st.dataframe(matches[cols].head(top_k).style.format({'score_final': '{:.3f}'}), use_container_width=True)
 
-    # Detalhes expandíveis
     st.divider()
     st.subheader('🔎 Detalhamento por vaga (top resultados)')
-    for _, row in scored.head(top_k).iterrows():
+
+    # Gráfico de decomposição de score para top-5
+    import matplotlib.pyplot as plt
+
+    for _, row in matches.head(min(5, len(matches))).iterrows():
         with st.expander(f"{row['job_id']} — {row['titulo']}  •  Score: {row['score_final']:.3f}"):
             cA, cB = st.columns([2,1])
             with cA:
@@ -355,7 +410,22 @@ if submitted:
                 st.metric('Localização', f"{row['score_local']:.3f}")
                 st.metric('Contrato', f"{row['score_contrato']:.3f}")
 
-    st.caption('Obs.: Este é um MVP. Ajuste os pesos e os campos do formulário conforme a realidade do seu processo.')
+            # chart
+            labels = ['Texto','Senioridade','Inglês','Espanhol','Local','Contrato']
+            values = [
+                float(row['score_texto']),
+                float(row['score_senioridade']),
+                float(row['score_ingles']),
+                float(row['score_espanhol']),
+                float(row['score_local']),
+                float(row['score_contrato'])
+            ]
+            fig, ax = plt.subplots()
+            ax.bar(labels, values)
+            ax.set_ylim(0, 1)
+            ax.set_ylabel('Score (0-1)')
+            ax.set_title('Decomposição de Score')
+            st.pyplot(fig)
 else:
-    st.info('Preencha o formulário e clique em **Buscar matches**. No menu lateral você pode ajustar os pesos e enviar o JSON de vagas.')
+    st.info('Preencha o formulário e clique em **Buscar matches** ou use **Recalcular matches** no menu lateral.')
 
