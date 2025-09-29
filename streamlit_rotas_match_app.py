@@ -464,8 +464,8 @@ def main_streamlit() -> None:
     with st.form('form_candidato'):
         c1, c2, c3 = st.columns(3)
         with c1:
-            cand_nome = st.text_input('Nome do candidato (opcional)')
-            cand_estado = st.text_input('Estado (UF) do candidato')
+            cand_nome = st.text_input('Nome do candidato')
+            cand_estado = st.text_input('Estado do candidato')
             cand_cidade = st.text_input('Cidade do candidato')
         with c2:
             cand_senior = st.selectbox('Senioridade do candidato', ['Júnior','Pleno','Sênior','Especialista / Líder','Gerente','Outro'], index=1)
