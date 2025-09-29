@@ -94,6 +94,10 @@ Certifique-se de que:
 - O arquivo de entrada se chama exatamente vagas.json
 
 ---
+## 🌐 Acesse o App Online
+🔍 Aplicativo [Streamlit App](https://datathon-jess.streamlit.app/)
+
+---
 
 ## 📹 Pitch do Projeto
 
