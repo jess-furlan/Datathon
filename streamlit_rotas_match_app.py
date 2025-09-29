@@ -345,8 +345,8 @@ def compute_scores(df: pd.DataFrame, vect: TfidfVectorizer, X_jobs, *,
 # =============================
 
 def main_streamlit() -> None:
-    st.set_page_config(page_title='Roteirizador de Entrevistas • Match de Vagas (v2)', layout='wide')
-    st.title('🎯 Roteirizador de Entrevistas — Match de Vagas (v2)')
+    st.set_page_config(page_title='Roteirizador de Entrevistas • Match de Vagas', layout='wide')
+    st.title('🎯 Roteirizador de Entrevistas — Match de Vagas')
 
     with st.sidebar:
         st.header('⚙️ Dados de Vagas')
