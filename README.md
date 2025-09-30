@@ -101,6 +101,6 @@ Certifique-se de que:
 
 ## 📹 Pitch do Projeto
 
-O vídeo de apresentação do projeto explica o problema, a solução e os benefícios. (link do vídeo aqui quando disponível)
+O vídeo de apresentação do projeto ([link do vídeo](https://youtu.be/ZyfV4w8W26s))
 
 ---
